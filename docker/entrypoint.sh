@@ -19,7 +19,7 @@ if [ "${ConfiguredPluginName}" != "PostgreSQL" ]; then
 fi
 
 # Check env variables set
-if [ -z "${POSTGRES_HOST}" ]; then
+if [ -z "${POSTGRES_HOST}" ] || [ -z "${POSTGRES_PASSWORD}" ]; then
     echo "PostgreSQL connectionstring variable unset. Please set 'POSTGRES_HOST' 'POSTGRES_PORT' 'POSTGRES_DB' 'POSTGRES_USER' and 'POSTGRES_PASSWORD' then restart"
     exit 3;
 fi
