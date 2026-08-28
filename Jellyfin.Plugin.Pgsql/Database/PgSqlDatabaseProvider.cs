@@ -94,6 +94,9 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
         {
             if (context.Database.IsNpgsql())
             {
+                // VACUUM ANALYZE can safely be interrupted and routinely exceeds the
+                // 30s default command timeout on large libraries - lift the timeout.
+                context.Database.SetCommandTimeout(0);
                 await context.Database.ExecuteSqlRawAsync("VACUUM ANALYZE", cancellationToken).ConfigureAwait(false);
                 _logger.LogInformation("PostgreSQL database optimized successfully");
             }
