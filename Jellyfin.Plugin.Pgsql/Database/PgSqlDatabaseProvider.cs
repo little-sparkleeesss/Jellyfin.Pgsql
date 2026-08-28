@@ -143,7 +143,9 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
     /// <inheritdoc/>
     public async Task<string> MigrationBackupFast(CancellationToken cancellationToken)
     {
-        var key = DateTime.UtcNow.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
+        // Milliseconds in the key so two backups started within the same second
+        // do not silently overwrite each other.
+        var key = DateTime.UtcNow.ToString("yyyyMMddHHmmssfff", CultureInfo.InvariantCulture);
         var backupFolder = Path.Combine(_applicationPaths.DataPath, BackupFolderName);
         Directory.CreateDirectory(backupFolder);
 
