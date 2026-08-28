@@ -203,7 +203,7 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
             StartInfo = new ProcessStartInfo
             {
                 FileName = "psql",
-                Arguments = $"--host={connectionBuilder.Host} --port={connectionBuilder.Port} --username={connectionBuilder.Username} --dbname={connectionBuilder.Database} --file=\"{backupFile}\" --no-password --quiet",
+                Arguments = $"--host={connectionBuilder.Host} --port={connectionBuilder.Port} --username={connectionBuilder.Username} --dbname={connectionBuilder.Database} --file=\"{backupFile}\" --no-password --quiet -v ON_ERROR_STOP=1",
                 Environment = { ["PGPASSWORD"] = connectionBuilder.Password },
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
