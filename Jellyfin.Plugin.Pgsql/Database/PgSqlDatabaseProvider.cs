@@ -152,7 +152,7 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
         var connectionBuilder = GetRuntimeConnectionBuilder();
         var backupFile = Path.Combine(backupFolder, $"{key}_{connectionBuilder.Database}.sql");
 
-        var process = new Process
+        using var process = new Process
         {
             StartInfo = new ProcessStartInfo
             {
@@ -175,8 +175,26 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
         // (JPVenson/Jellyfin.Pgsql#39).
         var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-        await stdoutTask.ConfigureAwait(false);
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            await stdoutTask.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Do not leave pg_dump running detached with its output pipes undrained.
+            try
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException)
+            {
+                // Process already exited.
+            }
+
+            throw;
+        }
+
         var error = await stderrTask.ConfigureAwait(false);
 
         if (process.ExitCode != 0)
@@ -203,7 +221,7 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
             return;
         }
 
-        var process = new Process
+        using var process = new Process
         {
             StartInfo = new ProcessStartInfo
             {
@@ -225,8 +243,26 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
         // large restore can't fill the redirected output buffer and deadlock.
         var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-        await stdoutTask.ConfigureAwait(false);
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            await stdoutTask.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Do not leave psql running detached with its output pipes undrained.
+            try
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException)
+            {
+                // Process already exited.
+            }
+
+            throw;
+        }
+
         var error = await stderrTask.ConfigureAwait(false);
 
         if (process.ExitCode != 0)
