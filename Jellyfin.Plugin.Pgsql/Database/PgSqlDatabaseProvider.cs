@@ -26,6 +26,7 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
     private const string BackupFolderName = "PgsqlBackups";
     private readonly ILogger<PgSqlDatabaseProvider> _logger;
     private readonly IApplicationPaths _applicationPaths;
+    private NpgsqlConnectionStringBuilder? _connectionBuilder;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="PgSqlDatabaseProvider"/> class.
@@ -46,7 +47,12 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
     {
         var customOptions = databaseConfiguration.CustomProviderOptions?.Options;
 
-        var connectionBuilder = GetConnectionBuilder(customOptions);
+        // Prefer the connection string from database.xml, which is Jellyfin's
+        // official configuration channel for custom providers (SSL mode, trust
+        // settings etc. are honored verbatim). Fall back to POSTGRES_* environment
+        // variables for the docker entrypoint flow.
+        var connectionBuilder = ResolveConnectionBuilder(databaseConfiguration);
+        ApplyCustomOptions(connectionBuilder, customOptions);
         connectionBuilder.ApplicationName = $"jellyfin+{FileVersionInfo.GetVersionInfo(Assembly.GetEntryAssembly()!.Location).FileVersion}";
 
         options
@@ -54,6 +60,18 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
             {
                 pgSqlOptions.MigrationsAssembly(GetType().Assembly.FullName);
             });
+
+        // Cache the resolved builder so backup/restore tooling (pg_dump/psql)
+        // talks to the exact same database as the runtime connection.
+        _connectionBuilder = connectionBuilder;
+
+        // Log the full connection string without password
+        var safeConnectionString = new NpgsqlConnectionStringBuilder(connectionBuilder.ToString())
+        {
+            Password = null
+        }.ToString();
+
+        _logger.LogInformation("PostgreSQL connection string: {ConnectionString}", safeConnectionString);
 
         var enableSensitiveDataLogging = GetCustomDatabaseOption(customOptions, "EnableSensitiveDataLogging", e => e.Equals(bool.TrueString, StringComparison.OrdinalIgnoreCase), () => false);
         if (enableSensitiveDataLogging)
@@ -126,7 +144,7 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
         var backupFolder = Path.Combine(_applicationPaths.DataPath, BackupFolderName);
         Directory.CreateDirectory(backupFolder);
 
-        var connectionBuilder = GetConnectionBuilder(null);
+        var connectionBuilder = GetRuntimeConnectionBuilder();
         var backupFile = Path.Combine(backupFolder, $"{key}_{connectionBuilder.Database}.sql");
 
         var process = new Process
@@ -171,7 +189,7 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
     {
         NpgsqlConnection.ClearAllPools();
 
-        var connectionBuilder = GetConnectionBuilder(null);
+        var connectionBuilder = GetRuntimeConnectionBuilder();
         var backupFile = Path.Combine(_applicationPaths.DataPath, BackupFolderName, $"{key}_{connectionBuilder.Database}.sql");
 
         if (!File.Exists(backupFile))
@@ -218,7 +236,7 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
     /// <inheritdoc/>
     public Task DeleteBackup(string key)
     {
-        var connectionBuilder = GetConnectionBuilder(null);
+        var connectionBuilder = GetRuntimeConnectionBuilder();
         var backupFile = Path.Combine(_applicationPaths.DataPath, BackupFolderName, $"{key}_{connectionBuilder.Database}.sql");
 
         if (!File.Exists(backupFile))
@@ -265,11 +283,41 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
         return converter(value.Value);
     }
 
-    private NpgsqlConnectionStringBuilder GetConnectionBuilder(ICollection<CustomDatabaseOption>? options)
+    private NpgsqlConnectionStringBuilder ResolveConnectionBuilder(DatabaseConfigurationOptions databaseConfiguration)
+    {
+        var connectionString = databaseConfiguration.CustomProviderOptions?.ConnectionString;
+        if (!string.IsNullOrWhiteSpace(connectionString))
+        {
+            return new NpgsqlConnectionStringBuilder(connectionString);
+        }
+
+        return GetConnectionBuilder();
+    }
+
+    private void ApplyCustomOptions(NpgsqlConnectionStringBuilder connectionBuilder, ICollection<CustomDatabaseOption>? options)
     {
         var includeErrorDetail = GetCustomDatabaseOption(options, "IncludeErrorDetail", e => e.Equals(bool.TrueString, StringComparison.OrdinalIgnoreCase), () => false);
-        var logParameters = GetCustomDatabaseOption(options, "LogParameters", e => e.Equals(bool.TrueString, StringComparison.OrdinalIgnoreCase), () => false);
+        if (includeErrorDetail)
+        {
+            connectionBuilder.IncludeErrorDetail = includeErrorDetail;
+        }
 
+        var logParameters = GetCustomDatabaseOption(options, "LogParameters", e => e.Equals(bool.TrueString, StringComparison.OrdinalIgnoreCase), () => false);
+        if (logParameters)
+        {
+            connectionBuilder.LogParameters = logParameters;
+        }
+    }
+
+    /// <summary>
+    /// Gets the connection builder resolved during <see cref="Initialise"/>, falling back to
+    /// environment variables when it has not been initialised yet (e.g. design time usage).
+    /// </summary>
+    private NpgsqlConnectionStringBuilder GetRuntimeConnectionBuilder()
+        => _connectionBuilder ?? GetConnectionBuilder();
+
+    private NpgsqlConnectionStringBuilder GetConnectionBuilder()
+    {
         var connectionBuilder = new NpgsqlConnectionStringBuilder
         {
             Host = Environment.GetEnvironmentVariable("POSTGRES_HOST") ?? "jellyfin",
@@ -282,24 +330,6 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
             // Raise it via POSTGRES_COMMAND_TIMEOUT for slow queries on large libraries.
             CommandTimeout = int.Parse(Environment.GetEnvironmentVariable("POSTGRES_COMMAND_TIMEOUT") ?? "30", CultureInfo.InvariantCulture)
         };
-
-        if (includeErrorDetail)
-        {
-            connectionBuilder.IncludeErrorDetail = includeErrorDetail;
-        }
-
-        if (logParameters)
-        {
-            connectionBuilder.LogParameters = logParameters;
-        }
-
-        // Log the full connection string without password
-        var safeConnectionString = new NpgsqlConnectionStringBuilder(connectionBuilder.ToString())
-        {
-            Password = null
-        }.ToString();
-
-        _logger.LogInformation("PostgreSQL connection string: {ConnectionString}", safeConnectionString);
 
         return connectionBuilder;
     }
