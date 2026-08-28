@@ -1,3 +1,5 @@
+using Jellyfin.Database.Implementations;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
@@ -10,6 +12,8 @@ namespace Jellyfin.Plugin.Pgsql.Migrations;
 /// ordering behave byte-wise like SQLite BINARY, independent of the
 /// PostgreSQL cluster's default locale.
 /// </summary>
+[DbContext(typeof(JellyfinDbContext))]
+[Migration("20260829120000_ApplyCCollation")]
 public partial class ApplyCCollation : Migration
 {
     /// <inheritdoc />
