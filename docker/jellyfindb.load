@@ -4,3 +4,12 @@ load database
 
 with quote identifiers, data only, truncate, drop indexes
 excluding table names like '__EFMigrationsHistory'
+
+-- The sqlite source has no NormalizedUsername column, so imported rows all
+-- carry the '' default. pgloader drops indexes before loading and re-creates
+-- them after; 'after load' runs after index re-creation, so the unique index
+-- would fail on the duplicate ''. Backfill the values and re-create the
+-- index here. Fails loudly if case-variant duplicate usernames exist.
+after load do
+  $$ UPDATE "Users" SET "NormalizedUsername" = UPPER("Username"); $$,
+  $$ CREATE UNIQUE INDEX "IX_Users_NormalizedUsername" ON "Users" ("NormalizedUsername"); $$;
