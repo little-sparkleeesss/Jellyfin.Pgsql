@@ -65,14 +65,24 @@ Update the `database.xml` file to switch to the plugin as its database provider:
 
 Launch your Jellyfin server.
 
+> [!IMPORTANT]
+> Manual (non-docker) installs additionally require:
+> - The `pg_dump` and `psql` binaries on `PATH` - the plugin shells out to them for the automatic pre-migration backup and restore, and a missing binary aborts startup.
+> - A PostgreSQL user with `CREATEDB` privilege - Jellyfin creates the database itself on first run (unless you pre-create it).
+> - The `POSTGRES_*` environment variables described above. The `ConnectionString` in `database.xml` is honored (SSL mode, trust settings etc.), but the environment variables remain the fallback and the documentation baseline.
+
 # Add migration
 Run `dotnet ef migrations add {MIGRATION_NAME} --project "/workspaces/Jellyfin.Pgsql/Jellyfin.Plugin.Pgsql" -- --migration-provider Jellyfin-PgSql`
 
+> [!NOTE]
+> The `-- --migration-provider Jellyfin-PgSql` passthrough currently has no effect:
+> the design-time factory (`PgSqlDesignTimeJellyfinDbFactory`) always selects
+> Npgsql and ignores the arguments. It is kept for compatibility with future
+> Jellyfin versions that may use it.
+
 # Release flow
 
-To create a new release, first sync all Jellyfin server changes then create a new migration as seen above. After that create a new efbundle:
-`dotnet ef migrations bundle -o docker/jellyfin.PgsqlMigrator.dll -r linux-x64 --self-contained --project "/workspaces/Jellyfin.Pgsql/Jellyfin.Plugin.Pgsql" --  --migration-provider Jellyfin-PgSql`
-Then build the container.
+To create a new release, first sync all Jellyfin server changes, then add a new migration as seen above and build the container. No EF bundle is required: Jellyfin applies pending migrations from the plugin's migrations assembly through its own migration service at startup.
 
 # Migration Instructions (ADVANCED, UNTESTED)
 
@@ -89,3 +99,9 @@ To migrate your existing Jellyfin instance to a custom database (not using the d
 9. Start Jellyfin
 
 If you get an error regarding a missing `__EFMigrationsHistory` you did not start Jellyfin with a clear state.
+
+# Known limitations
+
+- **Case-sensitive `LIKE` search** - Jellyfin's `NameContains` filter translates to `LIKE`, which is case-insensitive for ASCII on SQLite but strictly case-sensitive on PostgreSQL. The main search box is unaffected (both sides are lowercased). Fixing this requires changing Jellyfin's query translation, not this plugin.
+- **Collation migration locks large tables** - the `20260829120000_ApplyCCollation` migration rewrites every text column with `COLLATE "C"`. Fresh installs run it on empty tables; existing installs pay a one-time table rewrite under an `ACCESS EXCLUSIVE` lock - plan the upgrade window accordingly.
+- **pgloader migration path** - the load file backfills `NormalizedUsername` and re-creates its unique index after loading. It fails loudly if case-variant duplicate usernames exist in the source database. The migration path remains experimental (UNTESTED).
