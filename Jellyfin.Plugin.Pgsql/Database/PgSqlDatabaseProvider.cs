@@ -106,8 +106,11 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
     /// <inheritdoc/>
     public void OnModelCreating(ModelBuilder modelBuilder)
     {
-        // Use C collation for consistent case-sensitive behavior matching SQLite BINARY
-        modelBuilder.UseCollation("C");
+        // The C collation is applied column-wise by the ApplyCCollation migration.
+        // It must NOT be set as a model-level annotation: NpgsqlDatabaseCreator
+        // then emits CREATE DATABASE ... COLLATE "C", which PostgreSQL rejects
+        // because it differs from the template database's collation (unless the
+        // database is created from template0), breaking first-run database creation.
 
         // Configure all DateTime properties to ensure UTC for PostgreSQL compatibility, matching SQLite provider
         foreach (var entityType in modelBuilder.Model.GetEntityTypes())
