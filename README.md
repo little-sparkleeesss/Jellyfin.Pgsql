@@ -34,8 +34,13 @@ services:
         - POSTGRES_DB=jellyfin
         - POSTGRES_USER=jellyfin
         - POSTGRES_PASSWORD=jellyfin
-      # Optional settings bellow, uncomment if you want to connect using SSL
+      # Optional: SSL via individual variables. For full verification
+      # (verify CA + hostname) use POSTGRES_SSLMODE=VerifyFull and mount the
+      # CA file into the container, e.g. - /path/to/ca.pem:/config/ca.pem:ro
       # - POSTGRES_SSLMODE=Require
+      # - POSTGRES_ROOTCERTIFICATE=/config/ca.pem
+      # Trust Server Certificate=true skips certificate chain validation and
+      # does NOT protect against man-in-the-middle attacks - avoid it.
       # - POSTGRES_TRUSTSERVERCERTIFICATE=true
       # Optional: per-command timeout in seconds (default 30, 0 = no limit).
       # Raise it if large libraries hit query timeouts.

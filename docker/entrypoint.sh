@@ -32,6 +32,10 @@ if [ -n "${POSTGRES_SSLMODE}" ]; then
     ConnectionString="${ConnectionString};SSL Mode=${POSTGRES_SSLMODE}"
 fi
 
+if [ -n "${POSTGRES_ROOTCERTIFICATE}" ]; then
+    ConnectionString="${ConnectionString};Root Certificate=${POSTGRES_ROOTCERTIFICATE}"
+fi
+
 if [ -n "${POSTGRES_TRUSTSERVERCERTIFICATE}" ]; then
     ConnectionString="${ConnectionString};Trust Server Certificate=${POSTGRES_TRUSTSERVERCERTIFICATE}"
 fi
