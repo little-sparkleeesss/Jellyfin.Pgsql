@@ -106,11 +106,49 @@ namespace Jellyfin.Plugin.Pgsql.Migrations
                 nullable: false,
                 defaultValue: false);
 
+            // Both columns are still text here, and the ::uuid cast below raises 22P02 on anything it cannot
+            // parse (empty string, wrong length, junk left behind by a pgloader import), which aborts the whole
+            // migration and leaves the server unable to start. The SQLite path nulls malformed values out before
+            // converting (ChangeOwnerIdToGuid and ChangePrimaryVersionIdToGuid); do the same. Only the two
+            // spellings Jellyfin itself writes are kept - the canonical hyphenated form in either case, and the
+            // hyphen-less "N" form - so anything left for the cast is guaranteed to parse. That is deliberately
+            // narrower than PostgreSQL's own parser, which also accepts braces and a hyphen after any group of
+            // four digits; being narrow only costs a value that would not have been written by Jellyfin anyway,
+            // while being wide would risk the abort this guards against.
+            migrationBuilder.Sql("""
+                UPDATE "BaseItems" SET "OwnerId" = NULL
+                WHERE "OwnerId" IS NOT NULL
+                  AND "OwnerId" !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+                  AND "OwnerId" !~ '^[0-9a-fA-F]{32}$';
+
+                UPDATE "BaseItems" SET "PrimaryVersionId" = NULL
+                WHERE "PrimaryVersionId" IS NOT NULL
+                  AND "PrimaryVersionId" !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+                  AND "PrimaryVersionId" !~ '^[0-9a-fA-F]{32}$';
+                """);
+
             // PostgreSQL has no implicit text -> uuid cast, so ALTER ... TYPE uuid needs USING (42804).
             // 10.11 stored "no owner/version" as the text Guid.Empty; 12.x expects NULL, and the
             // self-referencing FK added below rejects 00000000-... since no such item exists.
             migrationBuilder.Sql("ALTER TABLE \"BaseItems\" ALTER COLUMN \"PrimaryVersionId\" TYPE uuid USING NULLIF(\"PrimaryVersionId\", '00000000-0000-0000-0000-000000000000')::uuid;");
             migrationBuilder.Sql("ALTER TABLE \"BaseItems\" ALTER COLUMN \"OwnerId\" TYPE uuid USING NULLIF(\"OwnerId\", '00000000-0000-0000-0000-000000000000')::uuid;");
+
+            // OwnerId becomes a self-referencing FK below and 10.11 enforced nothing on it: deleting an owner
+            // item without touching its children leaves an OwnerId pointing at a row that no longer exists,
+            // which the constraint rejects with 23503 and aborts the migration. The SQLite path repoints those
+            // at the placeholder item (AddForeignKeyToOwnerId); do the same, but fall back to NULL when the
+            // placeholder is absent so the repair cannot itself violate the key it is preparing for. The second
+            // statement then matches nothing when the first one ran, and everything still dangling when it did not.
+            migrationBuilder.Sql("""
+                UPDATE "BaseItems" SET "OwnerId" = '00000000-0000-0000-0000-000000000001'
+                WHERE "OwnerId" IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM "BaseItems" AS owner WHERE owner."Id" = "BaseItems"."OwnerId")
+                  AND EXISTS (SELECT 1 FROM "BaseItems" WHERE "Id" = '00000000-0000-0000-0000-000000000001');
+
+                UPDATE "BaseItems" SET "OwnerId" = NULL
+                WHERE "OwnerId" IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM "BaseItems" AS owner WHERE owner."Id" = "BaseItems"."OwnerId");
+                """);
 
             // The SQLite SortOrder fix-up (numbering null SortOrders by rowid) is not carried over: on
             // PostgreSQL it ran before LinkedChildren is created, and there is no rowid. The table is
