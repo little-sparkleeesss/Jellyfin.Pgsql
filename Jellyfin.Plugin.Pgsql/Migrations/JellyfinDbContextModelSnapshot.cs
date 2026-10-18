@@ -366,7 +366,8 @@ namespace Jellyfin.Plugin.Pgsql.Migrations
 
                     b.HasIndex("Name");
 
-                    b.HasIndex("OwnerId");
+                    b.HasIndex("OwnerId")
+                        .HasFilter("\"OwnerId\" IS NOT NULL");
 
                     b.HasIndex("ParentId");
 
@@ -383,7 +384,8 @@ namespace Jellyfin.Plugin.Pgsql.Migrations
 
                     b.HasIndex("SeriesName");
 
-                    b.HasIndex("ExtraType", "OwnerId");
+                    b.HasIndex("ExtraType", "OwnerId")
+                        .HasFilter("\"ExtraType\" IS NOT NULL");
 
                     b.HasIndex("TopParentId", "Id");
 
