@@ -109,6 +109,29 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
     }
 
     /// <inheritdoc/>
+    public async Task RefreshStatistics(CancellationToken cancellationToken)
+    {
+        if (DbContextFactory is null)
+        {
+            return;
+        }
+
+        var context = await DbContextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        await using (context.ConfigureAwait(false))
+        {
+            if (context.Database.IsNpgsql())
+            {
+                // ANALYZE rather than VACUUM ANALYZE: the interface asks for something cheap enough
+                // to run after every library scan, so this must not reclaim space. It still
+                // routinely exceeds the 30s default command timeout on large libraries - lift it.
+                context.Database.SetCommandTimeout(0);
+                await context.Database.ExecuteSqlRawAsync("ANALYZE", cancellationToken).ConfigureAwait(false);
+                _logger.LogInformation("PostgreSQL planner statistics refreshed successfully");
+            }
+        }
+    }
+
+    /// <inheritdoc/>
     public void OnModelCreating(ModelBuilder modelBuilder)
     {
         // The C collation is applied column-wise by the ApplyCCollation migration.
