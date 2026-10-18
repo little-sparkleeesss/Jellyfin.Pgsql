@@ -192,3 +192,12 @@ csharp_space_between_method_call_empty_parameter_list_parentheses = false
 # Wrapping preferences
 csharp_preserve_single_line_statements = true
 csharp_preserve_single_line_blocks = true
+
+# Entity Framework generates migrations with constant array arguments, e.g.
+# CreateIndex(columns: new[] { "A", "B" }). AnalysisMode=AllEnabledByDefault
+# (see the csproj) enables CA1861, and TreatWarningsAsErrors makes it fatal.
+# The files are generated - regenerate them with `dotnet ef migrations add`
+# rather than hand-editing - so relax the rule for the Migrations folder only.
+# Upstream Jellyfin instead demotes CA1861 to 'suggestion' for all code.
+[**/Migrations/*.cs]
+dotnet_diagnostic.CA1861.severity = none
