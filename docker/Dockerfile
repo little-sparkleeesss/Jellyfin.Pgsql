@@ -1,6 +1,6 @@
 # Build stage
 # Context hint: project root ../
-# sudo docker build -t ghcr.io/jpvenson/jellyfin.pgsql:12.1-1 -f ./Dockerfile ../
+# sudo docker build -t ghcr.io/jpvenson/jellyfin.pgsql:12.2-1 -f ./Dockerfile ../
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
@@ -19,7 +19,8 @@ RUN dotnet restore Jellyfin.Plugin.Pgsql.sln
 RUN dotnet publish Jellyfin.Plugin.Pgsql.sln -c Release --no-restore -o /app/publish
 
 # Final stage - Jellyfin with plugin
-FROM jellyfin/jellyfin:12.1
+# The CI docker workflow greps this tag to build the release tag {jellyfin-version}-{N}.
+FROM jellyfin/jellyfin:12.2
 
 # Install PostgreSQL 18 client tools for backup/restore functionality
 RUN apt-get update && \
