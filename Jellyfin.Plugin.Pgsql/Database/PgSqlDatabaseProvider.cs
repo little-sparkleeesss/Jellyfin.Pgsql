@@ -61,6 +61,11 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
                 pgSqlOptions.MigrationsAssembly(GetType().Assembly.FullName);
             });
 
+        // Jellyfin's MigrateRatingLevels routine enumerates a reader while writing through the same
+        // connection, which PostgreSQL rejects. The interceptor buffers that one query so the
+        // routine can run; re-check it on every Jellyfin upgrade, see the class remarks for how.
+        options.AddInterceptors(new MigrateRatingLevelsInterceptor(_logger));
+
         // Cache the resolved builder so backup/restore tooling (pg_dump/psql)
         // talks to the exact same database as the runtime connection.
         _connectionBuilder = connectionBuilder;
