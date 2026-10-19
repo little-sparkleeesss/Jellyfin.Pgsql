@@ -24,20 +24,45 @@ if [ -z "${POSTGRES_HOST}" ] || [ -z "${POSTGRES_PASSWORD}" ]; then
     exit 3;
 fi
 
-# Build connection string for migration
-ConnectionString="Password=${POSTGRES_PASSWORD};User ID=${POSTGRES_USER};Host=${POSTGRES_HOST};Port=${POSTGRES_PORT};Database=${POSTGRES_DB}"
+# Quote a value for the semicolon-delimited Npgsql connection string. Values
+# are wrapped in single quotes and a literal quote is written twice; without
+# this a password containing ';' or leading/trailing spaces is misparsed.
+quote_conn_value() {
+    local value="${1//\'/\'\'}"
+    printf "'%s'" "${value}"
+}
+
+# Build connection string for migration. Empty optional values are omitted so
+# the provider can apply its documented defaults (and POSTGRES_COMMAND_TIMEOUT)
+# for them.
+ConnectionString="Password=$(quote_conn_value "${POSTGRES_PASSWORD}")"
+if [ -n "${POSTGRES_HOST}" ]; then
+    ConnectionString="${ConnectionString};Host=$(quote_conn_value "${POSTGRES_HOST}")"
+fi
+
+if [ -n "${POSTGRES_PORT}" ]; then
+    ConnectionString="${ConnectionString};Port=$(quote_conn_value "${POSTGRES_PORT}")"
+fi
+
+if [ -n "${POSTGRES_DB}" ]; then
+    ConnectionString="${ConnectionString};Database=$(quote_conn_value "${POSTGRES_DB}")"
+fi
+
+if [ -n "${POSTGRES_USER}" ]; then
+    ConnectionString="${ConnectionString};User ID=$(quote_conn_value "${POSTGRES_USER}")"
+fi
 
 # Add SSL options if provided
 if [ -n "${POSTGRES_SSLMODE}" ]; then
-    ConnectionString="${ConnectionString};SSL Mode=${POSTGRES_SSLMODE}"
+    ConnectionString="${ConnectionString};SSL Mode=$(quote_conn_value "${POSTGRES_SSLMODE}")"
 fi
 
 if [ -n "${POSTGRES_ROOTCERTIFICATE}" ]; then
-    ConnectionString="${ConnectionString};Root Certificate=${POSTGRES_ROOTCERTIFICATE}"
+    ConnectionString="${ConnectionString};Root Certificate=$(quote_conn_value "${POSTGRES_ROOTCERTIFICATE}")"
 fi
 
 if [ -n "${POSTGRES_TRUSTSERVERCERTIFICATE}" ]; then
-    ConnectionString="${ConnectionString};Trust Server Certificate=${POSTGRES_TRUSTSERVERCERTIFICATE}"
+    ConnectionString="${ConnectionString};Trust Server Certificate=$(quote_conn_value "${POSTGRES_TRUSTSERVERCERTIFICATE}")"
 fi
 
 # Update database.xml with connection string
