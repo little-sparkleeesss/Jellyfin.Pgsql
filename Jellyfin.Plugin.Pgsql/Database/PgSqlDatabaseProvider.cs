@@ -209,18 +209,20 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
         var connectionBuilder = GetRuntimeConnectionBuilder();
         var backupFile = Path.Combine(backupFolder, $"{key}_{connectionBuilder.Database}.sql");
 
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "pg_dump",
+            Arguments = $"--host={connectionBuilder.Host} --port={connectionBuilder.Port} --username={connectionBuilder.Username} --dbname={connectionBuilder.Database} --file=\"{backupFile}\" --no-password --verbose --clean --if-exists",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+        ApplyPgEnvironment(startInfo, connectionBuilder);
+
         using var process = new Process
         {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = "pg_dump",
-                Arguments = $"--host={connectionBuilder.Host} --port={connectionBuilder.Port} --username={connectionBuilder.Username} --dbname={connectionBuilder.Database} --file=\"{backupFile}\" --no-password --verbose --clean --if-exists",
-                Environment = { ["PGPASSWORD"] = connectionBuilder.Password },
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            }
+            StartInfo = startInfo
         };
 
         _logger.LogInformation("Starting PostgreSQL backup: {BackupFile}", backupFile);
@@ -278,28 +280,30 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
             return;
         }
 
+        var startInfo = new ProcessStartInfo
+        {
+            // The dump is replayed with --clean --if-exists, but that alone cannot roll
+            // back a migration that changed the schema: objects created after the backup
+            // still depend on objects the dump wants to drop, so psql aborts part way
+            // through and leaves the database in a mix of both schemas. Worse, those newer
+            // objects would survive the restore while the restored migration history says
+            // the migration never ran, so the next start would fail creating them again.
+            // Wiping Jellyfin's tables first makes the replay land on an empty database,
+            // which is what the backup actually describes. Anything the operator created
+            // in that schema outside Jellyfin is dropped with it - the database belongs to
+            // Jellyfin, and this path only runs when a migration already failed.
+            FileName = "psql",
+            Arguments = $"--host={connectionBuilder.Host} --port={connectionBuilder.Port} --username={connectionBuilder.Username} --dbname={connectionBuilder.Database} --no-password --quiet -v ON_ERROR_STOP=1 -c \"{WipeSql}\" --file=\"{backupFile}\"",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+        ApplyPgEnvironment(startInfo, connectionBuilder);
+
         using var process = new Process
         {
-            StartInfo = new ProcessStartInfo
-            {
-                // The dump is replayed with --clean --if-exists, but that alone cannot roll
-                // back a migration that changed the schema: objects created after the backup
-                // still depend on objects the dump wants to drop, so psql aborts part way
-                // through and leaves the database in a mix of both schemas. Worse, those newer
-                // objects would survive the restore while the restored migration history says
-                // the migration never ran, so the next start would fail creating them again.
-                // Wiping Jellyfin's tables first makes the replay land on an empty database,
-                // which is what the backup actually describes. Anything the operator created
-                // in that schema outside Jellyfin is dropped with it - the database belongs to
-                // Jellyfin, and this path only runs when a migration already failed.
-                FileName = "psql",
-                Arguments = $"--host={connectionBuilder.Host} --port={connectionBuilder.Port} --username={connectionBuilder.Username} --dbname={connectionBuilder.Database} --no-password --quiet -v ON_ERROR_STOP=1 -c \"{WipeSql}\" --file=\"{backupFile}\"",
-                Environment = { ["PGPASSWORD"] = connectionBuilder.Password },
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            }
+            StartInfo = startInfo
         };
 
         _logger.LogInformation("Starting PostgreSQL restore from: {BackupFile}", backupFile);
@@ -495,6 +499,56 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
     /// </summary>
     private NpgsqlConnectionStringBuilder GetRuntimeConnectionBuilder()
         => _connectionBuilder ?? GetConnectionBuilder();
+
+    /// <summary>
+    /// Passes the connection's SSL settings to libpq through its environment variables.
+    /// pg_dump and psql do not read the Npgsql connection string, so without this they
+    /// would connect with libpq's defaults even when the runtime connection verifies the
+    /// server certificate.
+    /// </summary>
+    /// <param name="startInfo">The process to configure.</param>
+    /// <param name="connectionBuilder">The connection the tool must use.</param>
+    private static void ApplyPgEnvironment(ProcessStartInfo startInfo, NpgsqlConnectionStringBuilder connectionBuilder)
+    {
+        startInfo.Environment["PGPASSWORD"] = connectionBuilder.Password;
+        startInfo.Environment["PGSSLMODE"] = ToLibpqSslMode(connectionBuilder.SslMode);
+
+        if (!string.IsNullOrWhiteSpace(connectionBuilder.RootCertificate))
+        {
+            startInfo.Environment["PGSSLROOTCERT"] = connectionBuilder.RootCertificate;
+        }
+
+        if (!string.IsNullOrWhiteSpace(connectionBuilder.SslCertificate))
+        {
+            startInfo.Environment["PGSSLCERT"] = connectionBuilder.SslCertificate;
+        }
+
+        if (!string.IsNullOrWhiteSpace(connectionBuilder.SslKey))
+        {
+            startInfo.Environment["PGSSLKEY"] = connectionBuilder.SslKey;
+        }
+
+        if (!string.IsNullOrWhiteSpace(connectionBuilder.SslPassword))
+        {
+            startInfo.Environment["PGSSLPASSWORD"] = connectionBuilder.SslPassword;
+        }
+    }
+
+    /// <summary>
+    /// Converts Npgsql's SSL mode to the spelling libpq expects.
+    /// </summary>
+    /// <param name="sslMode">The connection's SSL mode.</param>
+    /// <returns>The matching libpq sslmode value.</returns>
+    private static string ToLibpqSslMode(SslMode sslMode) => sslMode switch
+    {
+        SslMode.Disable => "disable",
+        SslMode.Allow => "allow",
+        SslMode.Prefer => "prefer",
+        SslMode.Require => "require",
+        SslMode.VerifyCA => "verify-ca",
+        SslMode.VerifyFull => "verify-full",
+        _ => "prefer"
+    };
 
     private NpgsqlConnectionStringBuilder GetConnectionBuilder()
     {
