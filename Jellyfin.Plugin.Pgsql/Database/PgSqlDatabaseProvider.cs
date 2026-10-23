@@ -49,8 +49,8 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
 
         // Prefer the connection string from database.xml, which is Jellyfin's
         // official configuration channel for custom providers (SSL mode, trust
-        // settings etc. are honored verbatim). Fall back to POSTGRES_* environment
-        // variables for the docker entrypoint flow.
+        // settings etc. are honored). Any values it leaves out fall back to the
+        // POSTGRES_* environment variables for the docker entrypoint flow.
         var connectionBuilder = ResolveConnectionBuilder(databaseConfiguration);
         ApplyCustomOptions(connectionBuilder, customOptions);
         connectionBuilder.ApplicationName = $"jellyfin+{FileVersionInfo.GetVersionInfo(Assembly.GetEntryAssembly()!.Location).FileVersion}";
@@ -360,10 +360,82 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
         var connectionString = databaseConfiguration.CustomProviderOptions?.ConnectionString;
         if (!string.IsNullOrWhiteSpace(connectionString))
         {
-            return new NpgsqlConnectionStringBuilder(connectionString);
+            NpgsqlConnectionStringBuilder builder;
+            try
+            {
+                builder = new NpgsqlConnectionStringBuilder(connectionString);
+            }
+            catch (ArgumentException ex)
+            {
+                throw new InvalidOperationException(
+                    "The ConnectionString in database.xml is not a valid Npgsql connection string. Leave it empty to use the POSTGRES_* environment variables.",
+                    ex);
+            }
+
+            ApplyEnvironmentFallbacks(builder);
+            return builder;
         }
 
         return GetConnectionBuilder();
+    }
+
+    /// <summary>
+    /// Fills the values a database.xml connection string leaves out from the POSTGRES_*
+    /// environment variables. Explicit connection string values take precedence, but the
+    /// defaults (and POSTGRES_COMMAND_TIMEOUT) still apply when the string only sets the
+    /// required values.
+    /// </summary>
+    /// <param name="connectionBuilder">The connection string parsed from database.xml.</param>
+    private static void ApplyEnvironmentFallbacks(NpgsqlConnectionStringBuilder connectionBuilder)
+    {
+        if (!connectionBuilder.ShouldSerialize("Host"))
+        {
+            connectionBuilder.Host = GetEnvironmentValue("POSTGRES_HOST", "jellyfin");
+        }
+
+        if (!connectionBuilder.ShouldSerialize("Port"))
+        {
+            connectionBuilder.Port = int.Parse(GetEnvironmentValue("POSTGRES_PORT", "5432"), CultureInfo.InvariantCulture);
+        }
+
+        if (!connectionBuilder.ShouldSerialize("Database"))
+        {
+            connectionBuilder.Database = GetEnvironmentValue("POSTGRES_DB", "jellyfin");
+        }
+
+        if (!connectionBuilder.ShouldSerialize("Username"))
+        {
+            connectionBuilder.Username = GetEnvironmentValue("POSTGRES_USER", "jellyfin");
+        }
+
+        if (!connectionBuilder.ShouldSerialize("Password"))
+        {
+            var password = Environment.GetEnvironmentVariable("POSTGRES_PASSWORD");
+            if (string.IsNullOrWhiteSpace(password))
+            {
+                throw new InvalidOperationException("PostgreSQL password must be provided via POSTGRES_PASSWORD environment variable or the ConnectionString in database.xml");
+            }
+
+            connectionBuilder.Password = password;
+        }
+
+        if (!connectionBuilder.ShouldSerialize("Command Timeout"))
+        {
+            connectionBuilder.CommandTimeout = int.Parse(GetEnvironmentValue("POSTGRES_COMMAND_TIMEOUT", "30"), CultureInfo.InvariantCulture);
+        }
+    }
+
+    /// <summary>
+    /// Reads an environment variable, treating an empty value as unset. Docker Compose
+    /// examples commonly leave optional variables such as POSTGRES_PORT empty.
+    /// </summary>
+    /// <param name="name">The environment variable name.</param>
+    /// <param name="defaultValue">The value to use when the variable is missing or empty.</param>
+    /// <returns>The environment value or the default.</returns>
+    private static string GetEnvironmentValue(string name, string defaultValue)
+    {
+        var value = Environment.GetEnvironmentVariable(name);
+        return string.IsNullOrWhiteSpace(value) ? defaultValue : value;
     }
 
     private void ApplyCustomOptions(NpgsqlConnectionStringBuilder connectionBuilder, ICollection<CustomDatabaseOption>? options)
@@ -390,17 +462,23 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
 
     private NpgsqlConnectionStringBuilder GetConnectionBuilder()
     {
+        var password = Environment.GetEnvironmentVariable("POSTGRES_PASSWORD");
+        if (string.IsNullOrWhiteSpace(password))
+        {
+            throw new InvalidOperationException("PostgreSQL password must be provided via POSTGRES_PASSWORD environment variable");
+        }
+
         var connectionBuilder = new NpgsqlConnectionStringBuilder
         {
-            Host = Environment.GetEnvironmentVariable("POSTGRES_HOST") ?? "jellyfin",
-            Port = int.Parse(Environment.GetEnvironmentVariable("POSTGRES_PORT") ?? "5432", CultureInfo.InvariantCulture),
-            Database = Environment.GetEnvironmentVariable("POSTGRES_DB") ?? "jellyfin",
-            Username = Environment.GetEnvironmentVariable("POSTGRES_USER") ?? "jellyfin",
-            Password = Environment.GetEnvironmentVariable("POSTGRES_PASSWORD") ?? throw new InvalidOperationException("PostgreSQL password must be provided via POSTGRES_PASSWORD environment variable"),
+            Host = GetEnvironmentValue("POSTGRES_HOST", "jellyfin"),
+            Port = int.Parse(GetEnvironmentValue("POSTGRES_PORT", "5432"), CultureInfo.InvariantCulture),
+            Database = GetEnvironmentValue("POSTGRES_DB", "jellyfin"),
+            Username = GetEnvironmentValue("POSTGRES_USER", "jellyfin"),
+            Password = password,
 
             // Command timeout in seconds (0 = no limit). Defaults to Npgsql's 30s.
             // Raise it via POSTGRES_COMMAND_TIMEOUT for slow queries on large libraries.
-            CommandTimeout = int.Parse(Environment.GetEnvironmentVariable("POSTGRES_COMMAND_TIMEOUT") ?? "30", CultureInfo.InvariantCulture)
+            CommandTimeout = int.Parse(GetEnvironmentValue("POSTGRES_COMMAND_TIMEOUT", "30"), CultureInfo.InvariantCulture)
         };
 
         return connectionBuilder;
