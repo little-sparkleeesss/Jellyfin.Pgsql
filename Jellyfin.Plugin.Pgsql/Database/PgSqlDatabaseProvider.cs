@@ -12,6 +12,7 @@ using Jellyfin.Database.Implementations.DbConfiguration;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Configuration;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 
@@ -91,6 +92,12 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
         // connection, which PostgreSQL rejects. The interceptor buffers that one query so the
         // routine can run; re-check it on every Jellyfin upgrade, see the class remarks for how.
         options.AddInterceptors(new MigrateRatingLevelsInterceptor(_logger));
+
+        // Migrations run through this same context, so they inherit the runtime command timeout.
+        // The 12.1 migration scans and rewrites BaseItems and builds its indexes, which exceeds
+        // the 30s default on large libraries; the timeout aborts the migration and triggers a
+        // rollback, so migrations must run without it. Regular queries keep POSTGRES_COMMAND_TIMEOUT.
+        options.ReplaceService<IMigrationCommandExecutor, PgSqlMigrationCommandExecutor>();
 
         // Cache the resolved builder so backup/restore tooling (pg_dump/psql)
         // talks to the exact same database as the runtime connection.
@@ -209,10 +216,16 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
         var connectionBuilder = GetRuntimeConnectionBuilder();
         var backupFile = Path.Combine(backupFolder, $"{key}_{connectionBuilder.Database}.sql");
 
+        // Extensions are database infrastructure, not part of Jellyfin's schema. An
+        // administrator-installed extension (pgaudit, for example) is usually not owned by
+        // the Jellyfin role, so replaying --clean's "DROP EXTENSION" fails and aborts the
+        // restore. Leaving extensions out of the dump keeps it restorable by the Jellyfin
+        // role and leaves the operator's extensions untouched. Requires pg_dump 17+; the
+        // Docker image installs the client 18.
         var startInfo = new ProcessStartInfo
         {
             FileName = "pg_dump",
-            Arguments = $"--host={connectionBuilder.Host} --port={connectionBuilder.Port} --username={connectionBuilder.Username} --dbname={connectionBuilder.Database} --file=\"{backupFile}\" --no-password --verbose --clean --if-exists",
+            Arguments = $"--host={connectionBuilder.Host} --port={connectionBuilder.Port} --username={connectionBuilder.Username} --dbname={connectionBuilder.Database} --file=\"{backupFile}\" --no-password --verbose --clean --if-exists --exclude-extension=*",
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -292,8 +305,12 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
             // which is what the backup actually describes. Anything the operator created
             // in that schema outside Jellyfin is dropped with it - the database belongs to
             // Jellyfin, and this path only runs when a migration already failed.
+            // The wipe and the replay run in one transaction: if the dump cannot be
+            // replayed (an old backup still contains extension DDL, for example), the wipe
+            // is rolled back as well, so a failed restore leaves the database as it was
+            // instead of dropping every table and stopping at the first error.
             FileName = "psql",
-            Arguments = $"--host={connectionBuilder.Host} --port={connectionBuilder.Port} --username={connectionBuilder.Username} --dbname={connectionBuilder.Database} --no-password --quiet -v ON_ERROR_STOP=1 -c \"{WipeSql}\" --file=\"{backupFile}\"",
+            Arguments = $"--host={connectionBuilder.Host} --port={connectionBuilder.Port} --username={connectionBuilder.Username} --dbname={connectionBuilder.Database} --no-password --quiet --single-transaction -v ON_ERROR_STOP=1 -c \"{WipeSql}\" --file=\"{backupFile}\"",
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
