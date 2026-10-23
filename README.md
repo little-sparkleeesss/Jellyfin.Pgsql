@@ -15,7 +15,7 @@ This plugin adds postgres SQL support to [Jellyfin Server](https://github.com/je
 
 # How to use it
 
-You can use your existing Jellyfin compose file and change the image accordingly to: `ghcr.io/jpvenson/jellyfin.pgsql:10.11.11-1`.
+You can use your existing Jellyfin compose file and change the image accordingly to: `ghcr.io/jpvenson/jellyfin.pgsql:12.2-1`.
 
 You need to add the connection parameters as enviornment variables in your compose file:
 
@@ -23,7 +23,7 @@ You need to add the connection parameters as enviornment variables in your compo
 
 services:
   jellyfin:
-    image: ghcr.io/jpvenson/jellyfin.pgsql:10.11.11-1
+    image: ghcr.io/jpvenson/jellyfin.pgsql:12.2-1
     volumes:
         - /path/to/config:/config
         - /path/to/cache:/cache
@@ -39,9 +39,10 @@ services:
       # CA file into the container, e.g. - /path/to/ca.pem:/config/ca.pem:ro
       # - POSTGRES_SSLMODE=Require
       # - POSTGRES_ROOTCERTIFICATE=/config/ca.pem
-      # Trust Server Certificate=true skips certificate chain validation and
-      # does NOT protect against man-in-the-middle attacks - avoid it.
-      # - POSTGRES_TRUSTSERVERCERTIFICATE=true
+      # Npgsql 10 ignores Trust Server Certificate. Use SSL Mode=Require to
+      # encrypt without certificate validation (vulnerable to MITM), or
+      # VerifyFull with a root certificate to validate the server.
+      # - POSTGRES_TRUSTSERVERCERTIFICATE=true   (accepted, does nothing)
       # Optional: per-command timeout in seconds (default 30, 0 = no limit).
       # Raise it if large libraries hit query timeouts.
       # - POSTGRES_COMMAND_TIMEOUT=120
@@ -59,14 +60,16 @@ Update the `database.xml` file to switch to the plugin as its database provider:
 <DatabaseConfigurationOptions xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
   <DatabaseType>PLUGIN_PROVIDER</DatabaseType>
   <CustomProviderOptions>
-    <PluginAssembly>../../../Jellyfin.Plugin.Pgsql/bin/debug/net9.0/Jellyfin.Plugin.Pgsql.dll</PluginAssembly>
+    <PluginAssembly>../../../Jellyfin.Plugin.Pgsql/bin/debug/net10.0/Jellyfin.Plugin.Pgsql.dll</PluginAssembly>
     <PluginName>PostgreSQL</PluginName>
-    <ConnectionString>CONNECTION_STRING_TO_LOCAL_PGSQL_SERVER</ConnectionString>
+    <ConnectionString></ConnectionString>
   </CustomProviderOptions>
   <LockingBehavior>NoLock</LockingBehavior>
 </DatabaseConfigurationOptions>
 
 ```
+
+Leave `ConnectionString` empty to use the `POSTGRES_*` environment variables. A non-empty value must be a valid Npgsql connection string; values it omits are filled from the environment variables and their defaults.
 
 Launch your Jellyfin server.
 
@@ -74,7 +77,7 @@ Launch your Jellyfin server.
 > Manual (non-docker) installs additionally require:
 > - The `pg_dump` and `psql` binaries on `PATH` - the plugin shells out to them for the automatic pre-migration backup and restore, and a missing binary aborts startup.
 > - A PostgreSQL user with `CREATEDB` privilege - Jellyfin creates the database itself on first run (unless you pre-create it).
-> - The `POSTGRES_*` environment variables described above. The `ConnectionString` in `database.xml` is honored (SSL mode, trust settings etc.), but the environment variables remain the fallback and the documentation baseline.
+> - The `POSTGRES_*` environment variables described above. The `ConnectionString` in `database.xml` is honored (SSL mode, trust settings etc.); values it omits fall back to these variables and their defaults. For a manual install, put SSL settings in the `ConnectionString` itself - the `POSTGRES_SSLMODE`/`POSTGRES_ROOTCERTIFICATE` variables are folded into it by the Docker entrypoint only.
 
 # Add migration
 Run `dotnet ef migrations add {MIGRATION_NAME} --project "/workspaces/Jellyfin.Pgsql/Jellyfin.Plugin.Pgsql" -- --migration-provider Jellyfin-PgSql`
@@ -89,7 +92,10 @@ Run `dotnet ef migrations add {MIGRATION_NAME} --project "/workspaces/Jellyfin.P
 
 To create a new release, first sync all Jellyfin server changes, then add a new migration as seen above and build the container. No EF bundle is required: Jellyfin applies pending migrations from the plugin's migrations assembly through its own migration service at startup.
 
-# Migration Instructions (ADVANCED, UNTESTED)
+# Migration Instructions (ADVANCED, CURRENTLY BROKEN)
+
+> [!WARNING]
+> The pgloader path below is verified broken against the 12.1 schema (see Known limitations). Do not follow it until `docker/jellyfindb.load` is reworked.
 
 To migrate your existing Jellyfin instance to a custom database (not using the docker image) follow the steps IN THIS ORDER.
 
@@ -110,4 +116,8 @@ If you get an error regarding a missing `__EFMigrationsHistory` you did not star
 - **Case-sensitive `LIKE` search** - Jellyfin's `NameContains` filter translates to `LIKE`, which is case-insensitive for ASCII on SQLite but strictly case-sensitive on PostgreSQL. The main search box is unaffected (both sides are lowercased). Fixing this requires changing Jellyfin's query translation, not this plugin.
 - **Collation migration locks large tables** - the `20260829120000_ApplyCCollation` migration rewrites every text column with `COLLATE "C"`. Fresh installs run it on empty tables; existing installs pay a one-time table rewrite under an `ACCESS EXCLUSIVE` lock - plan the upgrade window accordingly.
 - **`MigrateRatingLevels` cannot run on PostgreSQL, so the plugin buffers its query** - the Jellyfin 12.1/12.2 routine enumerates `BaseItems.AsNoTracking().Select(e => e.OfficialRating).Distinct()` and calls `ExecuteUpdate` on the same `DbContext` from inside the loop. SQLite tolerates a second command while a reader is open, PostgreSQL does not, so the routine throws `NpgsqlOperationInProgressException` and startup aborts on any database that already has items. `MigrateRatingLevelsInterceptor` drains that one query into memory before handing the reader back, leaving the connection idle; the routine then runs normally in the same transaction and records itself as applied. The interception logs `Buffered N rows of the MigrateRatingLevels rating query`; if a startup aborts in this routine without that line, widen `IsRatingLevelsQuery`. Once upstream materialises the query, delete the interceptor and its registration - no database cleanup is needed.
-- **pgloader migration path** - the load file backfills `NormalizedUsername` and re-creates its unique index after loading. It fails loudly if case-variant duplicate usernames exist in the source database. The migration path remains experimental (UNTESTED).
+- **pgloader migration path** - verified broken against the 12.1 schema for several reasons: the load file uses `${VAR}`, which pgloader does not parse (it offers `GETENV 'varname'`, Mustache `{{VAR}}` with `--context`, and the `PG*` environment variables when URI components are omitted); the SQLite source still has `BaseItems.ExtraIds`, `Permissions.Permission_Permissions_Guid` and `Preferences.Preference_Preferences_Guid`, which no longer exist in the target and which pgloader cannot exclude per column - all of its filters are table-level, and `CAST` can retype a column but not drop it from the COPY list; the `after load` step recreates `IX_Users_NormalizedUsername`, which the plugin's migrations already created; and `truncate` issues a plain `TRUNCATE` with no `CASCADE`, which PostgreSQL refuses on any table referenced by a foreign key - seventeen of them point at `BaseItems`, so the load cannot get past it. The path remains experimental (UNTESTED) until the load file is reworked.
+- **Upgrading an existing 10.11 database can lose data** - Jellyfin 12.1 drops `BaseItems.ExtraIds`; the column and its contents are removed by the `20260919055826_Jellyfin12.1` migration and cannot be restored by rolling back. `OwnerId` and `PrimaryVersionId` are also rewritten from text to `uuid`; values that are not canonical GUIDs are cleared, and `OwnerId` values that point at a missing item are reattached to the placeholder item. Take a backup (`pg_dump`) before upgrading.
+- **Two SQLite compatibility functions are created in your database** - Jellyfin 12.1 ships the `StripEmbeddedLinkedChildren` startup routine, which runs raw SQLite SQL (`json_remove`, `json_valid`) against whichever provider is configured. PostgreSQL has neither function, and a failing routine aborts startup, so the plugin's migration defines them in the current schema. `json_remove` only understands the top level `'$.Key'` paths that routine passes, and rewriting `BaseItems.Data` through `jsonb` normalises key order and whitespace (semantics are unaffected - the server reads it with `System.Text.Json`).
+- **First start after the upgrade runs an untimed full `VACUUM ANALYZE`** - Jellyfin 12.1 calls `RunScheduledOptimisation` after migrations have modified the database, not only on its schedule. On a large library expect a long first start; the startup UI shows `Optimizing database` while it runs.
+- **Jellyfin 12.2 refreshes planner statistics after every library scan** - the new `RefreshStatistics` provider call is implemented as `ANALYZE`, which the interface asks to stay cheap enough to run per scan (unlike `RunScheduledOptimisation`, it must not reclaim space). Like the scheduled optimisation it lifts the command timeout, because `ANALYZE` on a large library exceeds the 30s default.
