@@ -24,6 +24,32 @@ namespace Jellyfin.Plugin.Pgsql.Database;
 public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
 {
     private const string BackupFolderName = "PgsqlBackups";
+
+    // Drop the tables in the schema that holds Jellyfin's migration history before
+    // replaying the dump. Dropping the schema itself requires owning it, which is not
+    // guaranteed when the database was pre-created (the README allows that); dropping
+    // the tables with CASCADE removes their dependants and only needs table ownership.
+    private const string WipeSql = """
+        DO $wipe$
+        DECLARE
+            target text;
+            tbl record;
+        BEGIN
+            SELECT schemaname INTO target
+              FROM pg_tables
+             WHERE tablename = '__EFMigrationsHistory'
+             ORDER BY (schemaname = current_schema()) DESC
+             LIMIT 1;
+
+            target := coalesce(target, current_schema()::text, 'public');
+
+            FOR tbl IN SELECT tablename FROM pg_tables WHERE schemaname = target LOOP
+                EXECUTE format('DROP TABLE IF EXISTS %I.%I CASCADE', target, tbl.tablename);
+            END LOOP;
+        END
+        $wipe$;
+        """;
+
     private readonly ILogger<PgSqlDatabaseProvider> _logger;
     private readonly IApplicationPaths _applicationPaths;
     private NpgsqlConnectionStringBuilder? _connectionBuilder;
@@ -256,8 +282,18 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
         {
             StartInfo = new ProcessStartInfo
             {
+                // The dump is replayed with --clean --if-exists, but that alone cannot roll
+                // back a migration that changed the schema: objects created after the backup
+                // still depend on objects the dump wants to drop, so psql aborts part way
+                // through and leaves the database in a mix of both schemas. Worse, those newer
+                // objects would survive the restore while the restored migration history says
+                // the migration never ran, so the next start would fail creating them again.
+                // Wiping Jellyfin's tables first makes the replay land on an empty database,
+                // which is what the backup actually describes. Anything the operator created
+                // in that schema outside Jellyfin is dropped with it - the database belongs to
+                // Jellyfin, and this path only runs when a migration already failed.
                 FileName = "psql",
-                Arguments = $"--host={connectionBuilder.Host} --port={connectionBuilder.Port} --username={connectionBuilder.Username} --dbname={connectionBuilder.Database} --file=\"{backupFile}\" --no-password --quiet -v ON_ERROR_STOP=1",
+                Arguments = $"--host={connectionBuilder.Host} --port={connectionBuilder.Port} --username={connectionBuilder.Username} --dbname={connectionBuilder.Database} --no-password --quiet -v ON_ERROR_STOP=1 -c \"{WipeSql}\" --file=\"{backupFile}\"",
                 Environment = { ["PGPASSWORD"] = connectionBuilder.Password },
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
