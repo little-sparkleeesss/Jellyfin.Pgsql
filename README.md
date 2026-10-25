@@ -15,7 +15,7 @@ This plugin adds postgres SQL support to [Jellyfin Server](https://github.com/je
 
 # How to use it
 
-You can use your existing Jellyfin compose file and change the image accordingly to: `ghcr.io/jpvenson/jellyfin.pgsql:12.2-1`.
+You can use your existing Jellyfin compose file and change the image accordingly to: `ghcr.io/jpvenson/jellyfin.pgsql:12.3-1`.
 
 You need to add the connection parameters as enviornment variables in your compose file:
 
@@ -23,7 +23,7 @@ You need to add the connection parameters as enviornment variables in your compo
 
 services:
   jellyfin:
-    image: ghcr.io/jpvenson/jellyfin.pgsql:12.2-1
+    image: ghcr.io/jpvenson/jellyfin.pgsql:12.3-1
     volumes:
         - /path/to/config:/config
         - /path/to/cache:/cache
@@ -117,7 +117,7 @@ If you get an error regarding a missing `__EFMigrationsHistory` you did not star
 
 - **Case-sensitive `LIKE` search** - Jellyfin's `NameContains` filter translates to `LIKE`, which is case-insensitive for ASCII on SQLite but strictly case-sensitive on PostgreSQL. The main search box is unaffected (both sides are lowercased). Fixing this requires changing Jellyfin's query translation, not this plugin.
 - **Collation migration locks large tables** - the `20260829120000_ApplyCCollation` migration rewrites every text column with `COLLATE "C"`. Fresh installs run it on empty tables; existing installs pay a one-time table rewrite under an `ACCESS EXCLUSIVE` lock - plan the upgrade window accordingly.
-- **`MigrateRatingLevels` cannot run on PostgreSQL, so the plugin buffers its query** - the Jellyfin 12.1/12.2 routine enumerates `BaseItems.AsNoTracking().Select(e => e.OfficialRating).Distinct()` and calls `ExecuteUpdate` on the same `DbContext` from inside the loop. SQLite tolerates a second command while a reader is open, PostgreSQL does not, so the routine throws `NpgsqlOperationInProgressException` and startup aborts on any database that already has items. `MigrateRatingLevelsInterceptor` drains that one query into memory before handing the reader back, leaving the connection idle; the routine then runs normally in the same transaction and records itself as applied. The interception logs `Buffered N rows of the MigrateRatingLevels rating query`; if a startup aborts in this routine without that line, widen `IsRatingLevelsQuery`. Once upstream materialises the query, delete the interceptor and its registration - no database cleanup is needed.
+- **`MigrateRatingLevels` cannot run on PostgreSQL, so the plugin buffers its query** - the Jellyfin 12.1-12.3 routine enumerates `BaseItems.AsNoTracking().Select(e => e.OfficialRating).Distinct()` and calls `ExecuteUpdate` on the same `DbContext` from inside the loop. SQLite tolerates a second command while a reader is open, PostgreSQL does not, so the routine throws `NpgsqlOperationInProgressException` and startup aborts on any database that already has items. `MigrateRatingLevelsInterceptor` drains that one query into memory before handing the reader back, leaving the connection idle; the routine then runs normally in the same transaction and records itself as applied. The interception logs `Buffered N rows of the MigrateRatingLevels rating query`; if a startup aborts in this routine without that line, widen `IsRatingLevelsQuery`. Once upstream materialises the query, delete the interceptor and its registration - no database cleanup is needed.
 - **pgloader migration path** - verified broken against the 12.1 schema for several reasons: the load file uses `${VAR}`, which pgloader does not parse (it offers `GETENV 'varname'`, Mustache `{{VAR}}` with `--context`, and the `PG*` environment variables when URI components are omitted); the SQLite source still has `BaseItems.ExtraIds`, `Permissions.Permission_Permissions_Guid` and `Preferences.Preference_Preferences_Guid`, which no longer exist in the target and which pgloader cannot exclude per column - all of its filters are table-level, and `CAST` can retype a column but not drop it from the COPY list; the `after load` step recreates `IX_Users_NormalizedUsername`, which the plugin's migrations already created; and `truncate` issues a plain `TRUNCATE` with no `CASCADE`, which PostgreSQL refuses on any table referenced by a foreign key - seventeen of them point at `BaseItems`, so the load cannot get past it. The path remains experimental (UNTESTED) until the load file is reworked.
 - **Upgrading an existing 10.11 database can lose data** - Jellyfin 12.1 drops `BaseItems.ExtraIds`; the column and its contents are removed by the `20260919055826_Jellyfin12.1` migration and cannot be restored by rolling back. `OwnerId` and `PrimaryVersionId` are also rewritten from text to `uuid`; values that are not canonical GUIDs are cleared, and `OwnerId` values that point at a missing item are reattached to the placeholder item. Take a backup (`pg_dump`) before upgrading.
 - **EF migrations ignore `POSTGRES_COMMAND_TIMEOUT`** - the 12.1 migration scans and rewrites the whole `BaseItems` table and builds its indexes, which exceeds the 30s default on a large library and aborts the migration (on a timed-out migration the plugin tries to restore the pre-migration backup). `PgSqlMigrationCommandExecutor` clears the command timeout while EF executes migration commands; normal queries keep the configured value.
